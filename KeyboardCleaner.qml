@@ -247,9 +247,11 @@ Item {
         window: surface
       }
 
+      // Always opaque, whatever the theme's menu alpha: many themes make menu surfaces
+      // see-through, and cleaning mode has to hide the desktop, not tint it.
       Rectangle {
         anchors.fill: parent
-        color: root.background
+        color: Qt.rgba(root.background.r, root.background.g, root.background.b, 1)
       }
 
       // Swallows every click, scroll and drag that is not a hold on the ring: this is what
