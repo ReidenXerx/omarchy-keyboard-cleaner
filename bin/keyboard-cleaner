@@ -1,0 +1,378 @@
+#!/usr/bin/python3
+"""Switch every keyboard off while you clean it, and always switch it back on.
+
+  keyboard-cleaner lock <15-600>        the guard the overlay runs (see below)
+  keyboard-cleaner restore              switch back on whatever a lock left off
+  keyboard-cleaner restore-at <id> <t>  the watchdog a lock starts for itself
+
+The lock. Every device Hyprland lists as a keyboard -- built-in and USB keyboards, and
+the power, sleep, hotkey and media-key devices too -- is switched off in the compositor
+with `hl.device({ name = ..., enabled = false })`, so no key and no keybinding fires. The
+power key is also held with systemd-inhibit, for systems where logind acts on it without
+Hyprland. Pointer devices stay on: their clicks land on the overlay, which swallows them,
+and holding one on the ring is how you unlock early.
+
+Getting the keyboard back is the part that must never fail, so it happens on four
+independent paths:
+  1. the guard switches everything back on at "unlock" on stdin, at its deadline, on
+     SIGTERM/SIGHUP/SIGINT, and when its stdin closes (whoever started it is gone);
+  2. it is set to receive SIGTERM when the shell that started it dies, which is path 1;
+  3. a watchdog in its own session, started before anything is switched off, switches
+     everything back on shortly after the deadline even if the guard was SIGKILLed;
+  4. the overlay runs `restore` whenever it loads, which is every shell start.
+What gets switched off is recorded in the runtime directory BEFORE the first device goes
+off, so every one of those paths knows exactly what to switch back on. A record that
+cannot be trusted makes restore switch on every keyboard there is: turning a keyboard on
+is never the dangerous direction.
+
+Every process and file access goes through plugin_safety: root-owned /usr/bin tools with
+deadlines and output ceilings, capped no-follow reads, random O_EXCL temporary files and
+atomic renames.
+"""
+import json
+import math
+import os
+import pathlib
+import re
+import secrets
+import select
+import signal
+import sys
+import time
+
+sys.dont_write_bytecode = True  # no __pycache__ in the plugin (the shell watches it)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import plugin_safety as safe  # noqa: E402
+
+HELPER = pathlib.Path(__file__).resolve()
+STATE = pathlib.Path(safe.runtime_dir()) / "reidenxerx.keyboard-cleaner" / "lock.json"
+STATE_MAX = 64 * 1024
+STATE_LIMITS = {"max_depth": 3, "max_items": 512, "max_string": 512}
+
+SECONDS_RANGE = (15, 600)
+DEVICES_MAX = 128
+NAME_MAX = 256
+DEVICES_OUTPUT_MAX = 1024 * 1024
+DEVICES_LIMITS = {"max_depth": 8, "max_items": 50000, "max_string": 4096}
+EVAL_OUTPUT_MAX = 16 * 1024
+HYPRCTL_TIMEOUT = 4
+# How often a running lock re-asserts itself: a Hyprland config reload switches devices
+# back on, and a keyboard plugged in mid-clean is a new device.
+RESCAN_EVERY = 2.0
+POLL = 0.5
+# The watchdog acts this long after the deadline, so the guard's own unlock normally wins.
+WATCHDOG_GRACE = 5
+INHIBIT_WHAT = "handle-power-key:handle-suspend-key:handle-hibernate-key"
+RESTORE_ATTEMPTS = 4
+
+LOCK_ID = re.compile(r"[0-9a-f]{16}")
+SECONDS_ARG = re.compile(r"[0-9]{1,4}")
+DEADLINE_ARG = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?")
+
+STOP = {"reason": None}
+
+
+class UsageError(Exception):
+    pass
+
+
+def emit_json(event):
+    try:
+        print(json.dumps(event, sort_keys=True, separators=(",", ":")), flush=True)
+    except (BrokenPipeError, OSError, ValueError):
+        pass   # nobody is listening any more; the lock ends the same way
+
+
+# ---------------------------------------------------------------- devices
+
+def valid_name(name):
+    return isinstance(name, str) and 0 < len(name) <= NAME_MAX and name.isprintable()
+
+
+def lua_string(value):
+    """A Lua string literal for any device name. Everything outside printable ASCII, and
+    the quote and backslash, becomes a three-digit decimal escape, so a name from a USB
+    descriptor can never end the literal or become code."""
+    out = []
+    for byte in value.encode("utf-8"):
+        ch = chr(byte)
+        out.append(ch if 0x20 <= byte < 0x7f and ch not in '"\\' else f"\\{byte:03d}")
+    return '"' + "".join(out) + '"'
+
+
+def device_call(name, enabled):
+    return f"hl.device({{ name = {lua_string(name)}, enabled = {'true' if enabled else 'false'} }})"
+
+
+def eval_lua(chunk):
+    r = safe.run(["hyprctl", "eval", chunk], timeout=HYPRCTL_TIMEOUT, max_output=EVAL_OUTPUT_MAX)
+    return r.ok and r.text().strip() == "ok"
+
+
+def set_devices(names, enabled):
+    """The names that could not be switched: one eval for all of them first, then one per
+    device if that failed, so a single bad name cannot keep the rest from switching."""
+    if not names:
+        return []
+    if eval_lua("\n".join(device_call(n, enabled) for n in names)):
+        return []
+    return [n for n in names if not eval_lua(device_call(n, enabled))]
+
+
+def keyboards():
+    """Every keyboard device Hyprland knows, or None if it could not be asked."""
+    try:
+        r = safe.run(["hyprctl", "-j", "devices"], timeout=HYPRCTL_TIMEOUT, max_output=DEVICES_OUTPUT_MAX)
+        if not r.ok:
+            return None
+        doc = safe.loads(r.stdout, **DEVICES_LIMITS)
+    except (ValueError, UnicodeDecodeError, OSError, safe.UnsafeError):
+        return None
+    boards = doc.get("keyboards") if isinstance(doc, dict) else None
+    if not isinstance(boards, list):
+        return None
+    names = []
+    for board in boards:
+        name = board.get("name") if isinstance(board, dict) else None
+        if valid_name(name) and name not in names:
+            names.append(name)
+            if len(names) >= DEVICES_MAX:
+                break
+    return names
+
+
+# ---------------------------------------------------------------- the lock record
+
+def valid_state(raw):
+    if not isinstance(raw, dict):
+        return None
+    lock_id, devices, deadline = raw.get("id"), raw.get("devices"), raw.get("deadline")
+    if not isinstance(lock_id, str) or not LOCK_ID.fullmatch(lock_id):
+        return None
+    if not isinstance(devices, list) or len(devices) > DEVICES_MAX or not all(valid_name(n) for n in devices):
+        return None
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
+        return None
+    return {"id": lock_id, "devices": list(devices), "deadline": float(deadline)}
+
+
+def read_lock():
+    """(state, trouble). (None, False): nothing is locked. trouble: a record exists but
+    cannot be trusted -- malformed, oversized, a symlink or a file that is not ours."""
+    try:
+        blob = safe.read_file(STATE, STATE_MAX)
+    except (safe.UnsafeError, OSError):
+        return None, True
+    if blob is None:
+        return None, False
+    try:
+        state = valid_state(safe.loads(blob, **STATE_LIMITS))
+    except (ValueError, UnicodeDecodeError, safe.UnsafeError):
+        state = None
+    return state, state is None
+
+
+def save_state(state):
+    safe.write_json(STATE, state, mode=0o600, sort_keys=True, separators=(",", ":"))
+
+
+def restore(expected_id=None):
+    """0 when every recorded device is back on, or nothing was locked; 1 otherwise, with
+    the record kept so another path can try again. `expected_id` is the watchdog's: it
+    leaves a newer lock alone."""
+    state, trouble = read_lock()
+    if state is None and not trouble:
+        return 0
+    if expected_id is not None and state is not None and state["id"] != expected_id:
+        return 0
+    names = list(state["devices"]) if state is not None else []
+    if trouble:
+        current = keyboards()
+        if current is None:
+            return 1   # cannot tell what to switch on yet; keep the record for a retry
+        names += [n for n in current if n not in names]
+    failed = names
+    for attempt in range(RESTORE_ATTEMPTS):
+        failed = set_devices(failed, True)
+        if not failed:
+            break
+        time.sleep(0.25 * (attempt + 1))
+    if failed:
+        return 1
+    try:
+        safe.remove_file(STATE)
+    except (safe.UnsafeError, OSError):
+        return 1   # the keyboards are on; a symlinked or foreign record is left for a human
+    return 0
+
+
+def restore_at(lock_id, deadline):
+    """The watchdog: stand down as soon as that lock is gone, otherwise restore it once
+    the deadline and its grace have passed."""
+    while True:
+        state, trouble = read_lock()
+        if state is None and not trouble:
+            return 0
+        if state is not None and state["id"] != lock_id:
+            return 0
+        remaining = deadline + WATCHDOG_GRACE - time.time()
+        if remaining <= 0:
+            return restore(expected_id=lock_id)
+        time.sleep(min(remaining, 1.0))
+
+
+# ---------------------------------------------------------------- the guard
+
+def start_watchdog(lock_id, deadline, seconds):
+    # Its own session and no death signal: it has to outlive a guard that was killed.
+    # /usr/bin/timeout still bounds it, well after it will have acted.
+    return safe.spawn(["/usr/bin/python3", str(HELPER), "restore-at", lock_id, f"{deadline:.3f}"],
+                      timeout=seconds + WATCHDOG_GRACE + 60)
+
+
+def start_inhibitor(seconds):
+    try:
+        return safe.spawn(["systemd-inhibit", f"--what={INHIBIT_WHAT}", "--who=Keyboard cleaner",
+                           "--why=Cleaning the keyboard", "--mode=block", "/usr/bin/sleep",
+                           str(seconds + WATCHDOG_GRACE)], timeout=seconds + WATCHDOG_GRACE + 10)
+    except (safe.UnsafeError, OSError):
+        return None   # no systemd-inhibit: the power key is still off in Hyprland
+
+
+def stop_process(proc):
+    if proc is None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        for _ in range(20):
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+
+def keep_locked(state):
+    current = keyboards()
+    if current is not None:
+        new = [n for n in current if n not in state["devices"]]
+        new = new[:max(0, DEVICES_MAX - len(state["devices"]))]
+        if new:
+            # Recorded before they go off, like the first batch.
+            state["devices"] = state["devices"] + new
+            save_state(state)
+    set_devices(state["devices"], False)
+
+
+def wait_for_unlock(state, stdin_fd):
+    pending = b""
+    next_scan = time.monotonic() + RESCAN_EVERY
+    while True:
+        if STOP["reason"]:
+            return STOP["reason"]
+        remaining = state["deadline"] - time.time()
+        if remaining <= 0:
+            return "timer"
+        try:
+            ready, _, _ = select.select([stdin_fd], [], [], min(POLL, remaining))
+        except (OSError, ValueError):
+            return "parent gone"
+        if ready:
+            try:
+                chunk = os.read(stdin_fd, 256)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                return "parent gone"
+            pending = (pending + chunk)[-64:]
+            if b"unlock" in pending:
+                return "unlock"
+        if time.monotonic() >= next_scan:
+            next_scan = time.monotonic() + RESCAN_EVERY
+            keep_locked(state)
+
+
+def lock(seconds, stdin_fd=0, emit=emit_json):
+    """One cleaning lock, from start to the moment everything is back on. The exit code is
+    restore()'s: 0 means every keyboard is on again."""
+    STOP["reason"] = None
+    # A lock a crashed guard left behind is given back first, so two never overlap and the
+    # new record never hides what the old one switched off.
+    if restore() != 0:
+        emit({"event": "error", "message": "A previous lock could not be undone"})
+        return 1
+    names = keyboards()
+    if not names:
+        emit({"event": "error", "message": "Hyprland reported no keyboards to lock"})
+        return 1
+    lock_id = secrets.token_hex(8)
+    state = {"id": lock_id, "devices": names, "deadline": time.time() + seconds}
+    save_state(state)
+    try:
+        watchdog = start_watchdog(lock_id, state["deadline"], seconds)
+    except (safe.UnsafeError, OSError):
+        watchdog = None
+    if watchdog is None:
+        # No lock without the path that works when everything else has failed.
+        safe.remove_file(STATE)
+        emit({"event": "error", "message": "Could not start the unlock watchdog"})
+        return 1
+    inhibitor = start_inhibitor(seconds)
+    reason = "error"
+    try:
+        failed = set_devices(names, False)
+        emit({"event": "locked", "devices": len(names) - len(failed), "failed": len(failed),
+              "deadline": round(state["deadline"], 3), "seconds": seconds})
+        reason = wait_for_unlock(state, stdin_fd)
+    finally:
+        code = restore(expected_id=lock_id)
+        stop_process(inhibitor)
+        emit({"event": "unlocked", "reason": reason, "ok": code == 0})
+    return code
+
+
+# ---------------------------------------------------------------- cli
+
+def on_signal(signum, frame):
+    STOP["reason"] = signal.Signals(signum).name.lower()
+
+
+def run(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd == "lock":
+        if len(argv) != 3 or not SECONDS_ARG.fullmatch(argv[2]):
+            raise UsageError("usage: keyboard-cleaner lock <15-600>")
+        seconds = int(argv[2])
+        if not SECONDS_RANGE[0] <= seconds <= SECONDS_RANGE[1]:
+            raise UsageError("usage: keyboard-cleaner lock <15-600>")
+        safe.die_with_parent()
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, on_signal)
+        return lock(seconds)
+    if cmd == "restore":
+        if len(argv) != 2:
+            raise UsageError("usage: keyboard-cleaner restore")
+        return restore()
+    if cmd == "restore-at":
+        if len(argv) != 4 or not LOCK_ID.fullmatch(argv[2]) or not DEADLINE_ARG.fullmatch(argv[3]):
+            raise UsageError("usage: keyboard-cleaner restore-at <lock id> <deadline>")
+        return restore_at(argv[2], float(argv[3]))
+    raise UsageError(__doc__.strip())
+
+
+def main(argv):
+    try:
+        return run(argv)
+    except UsageError as e:
+        print(e, file=sys.stderr)
+        return 2
+    except (safe.UnsafeError, OSError, UnicodeDecodeError) as e:
+        print(f"keyboard-cleaner: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

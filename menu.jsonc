@@ -1,0 +1,26 @@
+  "setup.keyboard-cleaner": {
+    "icon": "󰌌",
+    "label": "Keyboard cleaner",
+    "aliases": ["clean keyboard", "cleaning", "wipe", "lock keyboard", "touchpad"]
+  },
+  "setup.keyboard-cleaner.1": {
+    "icon": "󰌌",
+    "label": "Clean for 1 minute",
+    "action": "omarchy-shell shell toggle reidenxerx.keyboard-cleaner '{\"seconds\":60}'"
+  },
+  "setup.keyboard-cleaner.2": {
+    "icon": "󰌌",
+    "label": "Clean for 2 minutes",
+    "action": "omarchy-shell shell toggle reidenxerx.keyboard-cleaner '{\"seconds\":120}'"
+  },
+  "setup.keyboard-cleaner.5": {
+    "icon": "󰌌",
+    "label": "Clean for 5 minutes",
+    "action": "omarchy-shell shell toggle reidenxerx.keyboard-cleaner '{\"seconds\":300}'"
+  },
+  "setup.keyboard-cleaner.restore": {
+    "icon": "󰌐",
+    "label": "Switch the keyboard back on",
+    "aliases": ["unlock keyboard", "keyboard not working", "restore keyboard"],
+    "action": "/usr/bin/python3 @PLUGIN_BIN@/keyboard-cleaner restore"
+  },

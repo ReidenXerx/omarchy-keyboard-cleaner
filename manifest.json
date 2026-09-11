@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "reidenxerx.keyboard-cleaner",
+  "name": "Keyboard cleaner",
+  "version": "1.0.0",
+  "author": "ReidenXerx",
+  "license": "MIT",
+  "description": "Switch every key off while you wipe your keyboard and touchpad. A themed full-screen card counts down; hold a click on the ring to unlock early, or let the timer end it.",
+  "kinds": ["overlay", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "KeyboardCleaner.qml", "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Keyboard cleaner",
+    "description": "Click to lock the keyboard and touchpad for cleaning",
+    "category": "System",
+    "aliases": ["clean", "cleaning", "keyboard", "lock", "wipe", "touchpad"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "seconds": 90 },
+    "schema": [
+      {
+        "key": "seconds",
+        "type": "integer",
+        "label": "Lock for (seconds)",
+        "min": 15, "max": 600, "step": 15,
+        "defaultValue": 90,
+        "description": "How long cleaning mode lasts before it unlocks by itself. Holding a click on the ring for three seconds unlocks it earlier."
+      }
+    ]
+  }
+}
