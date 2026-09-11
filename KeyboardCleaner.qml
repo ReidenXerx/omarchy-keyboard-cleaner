@@ -238,6 +238,15 @@ Item {
         window: surface
       }
 
+      // Touchpad gestures (a three-finger workspace swipe, say) are acted on by Hyprland
+      // itself, before any window sees them, so the mouse area below cannot swallow them.
+      // Hyprland skips its keybinds and gestures while the focused surface holds a
+      // shortcuts inhibitor, and this surface holds the keyboard focus.
+      ShortcutInhibitor {
+        enabled: root.opened && surface.primary
+        window: surface
+      }
+
       Rectangle {
         anchors.fill: parent
         color: root.background
@@ -275,8 +284,9 @@ Item {
 
           Text {
             anchors.horizontalCenter: parent.horizontalCenter
-            // md-keyboard (U+F030C), checked against the Nerd Font's own charset.
-            text: "󰌌"
+            // md-spray_bottle (U+F0AE0), checked against the Nerd Font's own cmap. Not a
+            // keyboard glyph: that one reads as an input-method indicator.
+            text: "󰫠"
             color: root.phase === "failed" ? root.urgent : root.accent
             font.family: root.glyphFamily
             font.pixelSize: Style.font.displayLarge

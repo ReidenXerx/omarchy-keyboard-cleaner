@@ -401,6 +401,8 @@ class Static(unittest.TestCase):
     def test_overlay_runs_only_the_helper_and_keeps_the_guards_stdin_open(self):
         qml = (ROOT / "KeyboardCleaner.qml").read_text()
         self.assertIn("stdinEnabled: true", qml)
+        # Touchpad gestures are Hyprland's own; only a shortcuts inhibitor pauses them.
+        self.assertRegex(qml, r"ShortcutInhibitor \{\s*enabled: root\.opened && surface\.primary\s*window: surface")
         self.assertNotIn("FileView", qml)
         runs = re.findall(r"(?:command =|execDetached\()\s*([^\n]*)", qml)
         self.assertGreaterEqual(len(runs), 4)

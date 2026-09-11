@@ -17,8 +17,9 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // md-keyboard (U+F030C), checked against the Nerd Font's own charset.
-    text: "󰌌"
+    // md-spray_bottle (U+F0AE0), checked against the Nerd Font's own cmap. Not a keyboard
+    // glyph: in a bar that reads as an input-method or layout indicator.
+    text: "󰫠"
     foreground: root.bar ? root.bar.barForeground : Color.foreground
     tooltipText: "Clean keyboard — switches every key off for "
       + (root.seconds >= 60 && root.seconds % 60 === 0 ? (root.seconds / 60) + " min" : root.seconds + "s")
