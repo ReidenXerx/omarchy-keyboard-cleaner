@@ -36,6 +36,11 @@ Requires Hyprland 0.56 or newer (Lua config) and `python3`, both on a stock Omar
 | **hold a click on the ring** for 3 seconds | unlock early |
 | let the countdown reach 0:00 | unlocks by itself |
 
+The widget also works inside bar organizers and plugin managers. Its standard
+bar-widget entry point talks directly to the same plugin-local runtime as the
+normal Omarchy overlay entry point, so moving the widget out of the top-level
+bar does not make cleaning mode unavailable or create a second lock session.
+
 While it is on:
 
 - **Every key is off** — letters, Super shortcuts, media, brightness and power keys, and any
@@ -95,8 +100,8 @@ Notes:
 
 ## Security
 
-- **No shell.** The overlay only ever runs `/usr/bin/python3 bin/keyboard-cleaner …` and the bar
-  button only `/usr/bin/omarchy-shell shell toggle …`, both as argument lists.
+- **No shell.** The runtime only ever runs `/usr/bin/python3 bin/keyboard-cleaner …` as an
+  argument list. The bar button calls that runtime directly; it does not spawn a command.
 - **Trusted tools, bounded runs.** The helper runs only root-owned tools from `/usr/bin`
   (`hyprctl`, `systemd-inhibit`, `timeout`, `sleep`), never via `PATH`, each with a hard deadline,
   an output ceiling and a whole-process-group kill.

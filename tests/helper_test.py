@@ -399,7 +399,7 @@ class Static(unittest.TestCase):
             self.assertIsNone(re.search(pattern, src), pattern)
 
     def test_overlay_runs_only_the_helper_and_keeps_the_guards_stdin_open(self):
-        qml = (ROOT / "KeyboardCleaner.qml").read_text()
+        qml = (ROOT / "runtime" / "KeyboardCleanerRuntime.qml").read_text()
         self.assertIn("stdinEnabled: true", qml)
         # Touchpad gestures are Hyprland's own; only a shortcuts inhibitor pauses them.
         self.assertRegex(qml, r"ShortcutInhibitor \{\s*enabled: root\.opened && surface\.primary\s*window: surface")
@@ -410,10 +410,27 @@ class Static(unittest.TestCase):
             self.assertTrue(line.startswith("[root.python, root.helper,"), line)
         self.assertIn('readonly property string python: "/usr/bin/python3"', qml)
 
-    def test_bar_widget_starts_the_overlay_with_an_argv_list(self):
+    def test_bar_widget_uses_the_plugin_local_runtime(self):
         qml = (ROOT / "BarWidget.qml").read_text()
-        self.assertIn('Quickshell.execDetached(["/usr/bin/omarchy-shell", "shell", "toggle", "reidenxerx.keyboard-cleaner",', qml)
+        self.assertIn('import "runtime" as Cleaner', qml)
+        self.assertIn("Cleaner.KeyboardCleanerRuntime.open(", qml)
+        self.assertIn("Cleaner.KeyboardCleanerRuntime.close()", qml)
+        self.assertNotIn("omarchy-shell", qml)
         self.assertNotIn("bar.run", qml)
+
+    def test_shell_overlay_delegates_to_the_same_runtime(self):
+        qml = (ROOT / "KeyboardCleaner.qml").read_text()
+        self.assertIn('import "runtime" as Cleaner', qml)
+        self.assertIn("Cleaner.KeyboardCleanerRuntime.open(payloadJson)", qml)
+        self.assertIn("Cleaner.KeyboardCleanerRuntime.close()", qml)
+        self.assertNotIn("Process {", qml)
+
+        runtime = (ROOT / "runtime" / "KeyboardCleanerRuntime.qml").read_text()
+        self.assertTrue(runtime.startswith("pragma Singleton\n"))
+        self.assertEqual(
+            (ROOT / "runtime" / "qmldir").read_text(),
+            "singleton KeyboardCleanerRuntime 1.0 KeyboardCleanerRuntime.qml\n",
+        )
 
     def test_menu_actions_are_the_overlay_or_the_helper(self):
         text = (ROOT / "menu.jsonc").read_text()

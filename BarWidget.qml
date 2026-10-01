@@ -1,7 +1,7 @@
 import QtQuick
-import Quickshell
 import qs.Commons
 import qs.Ui
+import "runtime" as Cleaner
 
 // A keyboard in the bar: click it to start cleaning mode for the configured time.
 BarWidget {
@@ -25,10 +25,14 @@ BarWidget {
       + (root.seconds >= 60 && root.seconds % 60 === 0 ? (root.seconds / 60) + " min" : root.seconds + "s")
       + "\nHold a click on the ring to unlock early"
 
-    // An argv list, not a shell line: the only program is Omarchy's own shell client.
+    // Call the plugin-owned runtime directly. A bar organizer only needs to
+    // instantiate this standard widget; it does not have to register or proxy
+    // the plugin's separate overlay entry point.
     onPressed: function (b) {
-      Quickshell.execDetached(["/usr/bin/omarchy-shell", "shell", "toggle", "reidenxerx.keyboard-cleaner",
-                               JSON.stringify({ seconds: root.seconds })])
+      if (Cleaner.KeyboardCleanerRuntime.opened)
+        Cleaner.KeyboardCleanerRuntime.close()
+      else
+        Cleaner.KeyboardCleanerRuntime.open(JSON.stringify({ seconds: root.seconds }))
     }
   }
 }
