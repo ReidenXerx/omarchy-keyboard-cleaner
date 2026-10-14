@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "reidenxerx.keyboard-cleaner",
   "name": "Keyboard cleaner",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "ReidenXerx",
   "license": "MIT",
   "description": "Switch every key off while you wipe your keyboard and touchpad. A themed full-screen card counts down; hold a click on the ring to unlock early, or let the timer end it.",

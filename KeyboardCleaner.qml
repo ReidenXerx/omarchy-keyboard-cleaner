@@ -3,6 +3,7 @@ import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "CleanerModel.js" as Model
 
@@ -31,13 +32,13 @@ Item {
   // ---------------------------------------------------------------- theme
 
   // The [menu] surface tokens, like Omarchy's own overlays, so every theme styles it.
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
+  property color background: Commons.Color.menu.background
+  property color foreground: Commons.Color.menu.text
+  property color border: Commons.Color.menu.border
   property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color accent: Color.accent
-  property color muted: Color.muted
-  property color urgent: Color.urgent
+  property color accent: Commons.Color.accent
+  property color muted: Commons.Color.muted
+  property color urgent: Commons.Color.urgent
   property string fontFamily: Style.font.menuFamily
   // Glyphs need the Nerd Font, which is what `monospace` resolves to.
   property string glyphFamily: Style.font.family

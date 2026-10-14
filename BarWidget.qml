@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // A keyboard in the bar: click it to start cleaning mode for the configured time.
@@ -20,7 +21,7 @@ BarWidget {
     // md-spray_bottle (U+F0AE0), checked against the Nerd Font's own cmap. Not a keyboard
     // glyph: in a bar that reads as an input-method or layout indicator.
     text: "󰫠"
-    foreground: root.bar ? root.bar.barForeground : Color.foreground
+    foreground: root.bar ? root.bar.barForeground : Commons.Color.foreground
     tooltipText: "Clean keyboard — switches every key off for "
       + (root.seconds >= 60 && root.seconds % 60 === 0 ? (root.seconds / 60) + " min" : root.seconds + "s")
       + "\nHold a click on the ring to unlock early"
