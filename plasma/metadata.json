@@ -1,0 +1,15 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Authors": [{ "Name": "DuduPhudu", "Email": "" }],
+    "Category": "Utilities",
+    "Description": "Switches every key off while you wipe your keyboard: a full-screen card counts down, hold a click on its ring to unlock early, and the keys always come back.",
+    "Icon": "input-keyboard",
+    "Id": "app.duduphudu.keyboard-cleaner",
+    "License": "MIT",
+    "Name": "Keyboard cleaner",
+    "Version": "1.0.1",
+    "Website": "https://duduphudu.app/plugins/keyboard-cleaner/"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

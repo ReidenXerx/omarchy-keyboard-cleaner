@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Assemble the Plasma widget: the plasma/ package plus CleanerModel.js and the guard (bin/keyboard-cleaner and
+# plugin_safety.py), into dist/app.duduphudu.keyboard-cleaner and dist/keyboard-cleaner.plasmoid.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+out="$root/dist/app.duduphudu.keyboard-cleaner"
+rm -rf -- "${out:?}" "$root/dist/keyboard-cleaner.plasmoid"
+mkdir -p "$out/contents/code/bin"
+cp -r "$root/plasma/." "$out/"
+cp "$root/CleanerModel.js" "$out/contents/code/"
+cp "$root/bin/keyboard-cleaner" "$root/bin/plugin_safety.py" "$out/contents/code/bin/"
+cp "$root/LICENSE" "$out/" 2>/dev/null || true
+chmod 755 "$out/contents/code/bin/keyboard-cleaner"
+(cd "$out" && /usr/bin/zip -qr "$root/dist/keyboard-cleaner.plasmoid" .)
+echo "$out"

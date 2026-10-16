@@ -75,6 +75,28 @@ Manual escape hatch, from any terminal or the Omarchy menu ("Switch the keyboard
 /usr/bin/python3 ~/.config/omarchy/plugins/reidenxerx.keyboard-cleaner/bin/keyboard-cleaner restore
 ```
 
+## On KDE Plasma
+
+The cleaner also comes as a Plasma 6 widget. Install it from the KDE Store (Add
+Widgets → Get New Widgets → search "Keyboard cleaner") or build it here:
+
+```bash
+tools/build-plasma          # dist/keyboard-cleaner.plasmoid
+kpackagetool6 -t Plasma/Applet -i dist/app.duduphudu.keyboard-cleaner
+```
+
+Click it and choose how long. The same guard does the work, with KWin in place
+of Hyprland: every input device KWin lists as a keyboard and not also a pointer
+is switched off through its `enabled` property over D-Bus, so the touchpad and
+mouse stay on for the unlock hold. Holding the ring runs `restore`, which the
+guard notices within a second. All four ways back still apply: the guard, the
+death signal when Plasma goes, the watchdog in its own session, and a `restore`
+whenever the widget loads. The manual escape hatch on Plasma is:
+
+```bash
+/usr/bin/python3 ~/.local/share/plasma/plasmoids/app.duduphudu.keyboard-cleaner/contents/code/bin/keyboard-cleaner restore
+```
+
 ## How it works
 
 - Every device `hyprctl devices` lists as a keyboard is switched off with

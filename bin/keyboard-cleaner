@@ -2,6 +2,9 @@
 """Switch every keyboard off while you clean it, and always switch it back on.
 
   keyboard-cleaner lock <15-600>        the guard the overlay runs (see below)
+  keyboard-cleaner lock <15-600> --no-stdin
+                                        the same for a caller that cannot write to it (the Plasma widget): unlock
+                                        early with `restore`, which the guard notices within a second
   keyboard-cleaner restore              switch back on whatever a lock left off
   keyboard-cleaner restore-at <id> <t>  the watchdog a lock starts for itself
 
@@ -24,6 +27,9 @@ What gets switched off is recorded in the runtime directory BEFORE the first dev
 off, so every one of those paths knows exactly what to switch back on. A record that
 cannot be trusted makes restore switch on every keyboard there is: turning a keyboard on
 is never the dangerous direction.
+
+On KDE Plasma the devices are KWin's: every input device that is a keyboard and not also a pointer (so the touchpad
+and mouse stay on for the unlock hold) is switched off by setting its `enabled` property over D-Bus, with busctl.
 
 Every process and file access goes through plugin_safety: root-owned /usr/bin tools with
 deadlines and output ceilings, capped no-follow reads, random O_EXCL temporary files and
@@ -66,6 +72,8 @@ INHIBIT_WHAT = "handle-power-key:handle-suspend-key:handle-hibernate-key"
 RESTORE_ATTEMPTS = 4
 
 LOCK_ID = re.compile(r"[0-9a-f]{16}")
+KWIN_DEVICE = re.compile(r"event[0-9]{1,5}")
+KWIN = ("org.kde.KWin", "/org/kde/KWin/InputDevice", "org.kde.KWin.InputDevice")
 SECONDS_ARG = re.compile(r"[0-9]{1,4}")
 DEADLINE_ARG = re.compile(r"[0-9]{1,12}(?:\.[0-9]{1,6})?")
 
@@ -100,6 +108,59 @@ def lua_string(value):
     return '"' + "".join(out) + '"'
 
 
+def kde_session():
+    """Plasma, where KWin owns the input devices. Hyprland is assumed everywhere else, as before."""
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return False
+    return "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":") and safe.has_tool("busctl")
+
+
+def busctl_json(args):
+    r = safe.run(["busctl", "--user", "--json=short"] + args, timeout=HYPRCTL_TIMEOUT, max_output=DEVICES_OUTPUT_MAX)
+    if not r.ok:
+        return None
+    try:
+        doc = safe.loads(r.stdout, **DEVICES_LIMITS)
+    except (ValueError, UnicodeDecodeError, safe.UnsafeError):
+        return None
+    return doc.get("data") if isinstance(doc, dict) else None
+
+
+def kwin_keyboards():
+    """KWin's input devices that are keyboards and not pointers, by their sysfs name (event4), or None."""
+    names = busctl_json(["get-property", KWIN[0], KWIN[1], "org.kde.KWin.InputDeviceManager", "devicesSysNames"])
+    if not isinstance(names, list):
+        return None
+    out = []
+    for name in names[:DEVICES_MAX * 4]:
+        if not isinstance(name, str) or not KWIN_DEVICE.fullmatch(name):
+            continue
+        props = busctl_json(["call", KWIN[0], f"{KWIN[1]}/{name}", "org.freedesktop.DBus.Properties", "GetAll",
+                             "s", KWIN[2]])
+        props = props[0] if isinstance(props, list) and props and isinstance(props[0], dict) else None
+        if props is None:
+            continue
+        flag = lambda key: isinstance(props.get(key), dict) and props[key].get("data") is True  # noqa: E731
+        if flag("keyboard") and not flag("pointer") and not flag("touchpad"):
+            out.append(name)
+            if len(out) >= DEVICES_MAX:
+                break
+    return out
+
+
+def kwin_set(names, enabled):
+    failed = []
+    for name in names:
+        if not KWIN_DEVICE.fullmatch(name):
+            failed.append(name)
+            continue
+        r = safe.run(["busctl", "--user", "set-property", KWIN[0], f"{KWIN[1]}/{name}", KWIN[2], "enabled", "b",
+                      "true" if enabled else "false"], timeout=HYPRCTL_TIMEOUT, max_output=EVAL_OUTPUT_MAX)
+        if not r.ok:
+            failed.append(name)
+    return failed
+
+
 def device_call(name, enabled):
     return f"hl.device({{ name = {lua_string(name)}, enabled = {'true' if enabled else 'false'} }})"
 
@@ -114,13 +175,17 @@ def set_devices(names, enabled):
     device if that failed, so a single bad name cannot keep the rest from switching."""
     if not names:
         return []
+    if kde_session():
+        return kwin_set(names, enabled)
     if eval_lua("\n".join(device_call(n, enabled) for n in names)):
         return []
     return [n for n in names if not eval_lua(device_call(n, enabled))]
 
 
 def keyboards():
-    """Every keyboard device Hyprland knows, or None if it could not be asked."""
+    """Every keyboard device Hyprland (or on Plasma, KWin) knows, or None if it could not be asked."""
+    if kde_session():
+        return kwin_keyboards()
     try:
         r = safe.run(["hyprctl", "-j", "devices"], timeout=HYPRCTL_TIMEOUT, max_output=DEVICES_OUTPUT_MAX)
         if not r.ok:
@@ -268,6 +333,8 @@ def keep_locked(state):
 
 
 def wait_for_unlock(state, stdin_fd):
+    """Until the timer, a signal, "unlock" on stdin or stdin closing -- or, with no stdin to watch (stdin_fd None),
+    until somebody else's `restore` took the lock record away."""
     pending = b""
     next_scan = time.monotonic() + RESCAN_EVERY
     while True:
@@ -276,6 +343,15 @@ def wait_for_unlock(state, stdin_fd):
         remaining = state["deadline"] - time.time()
         if remaining <= 0:
             return "timer"
+        if stdin_fd is None:
+            time.sleep(min(POLL, remaining))
+            current, _ = read_lock()
+            if current is None or current["id"] != state["id"]:
+                return "unlock"
+            if time.monotonic() >= next_scan:
+                next_scan = time.monotonic() + RESCAN_EVERY
+                keep_locked(state)
+            continue
         try:
             ready, _, _ = select.select([stdin_fd], [], [], min(POLL, remaining))
         except (OSError, ValueError):
@@ -306,7 +382,7 @@ def lock(seconds, stdin_fd=0, emit=emit_json):
         return 1
     names = keyboards()
     if not names:
-        emit({"event": "error", "message": "Hyprland reported no keyboards to lock"})
+        emit({"event": "error", "message": "No keyboards were found to switch off"})
         return 1
     lock_id = secrets.token_hex(8)
     state = {"id": lock_id, "devices": names, "deadline": time.time() + seconds}
@@ -343,15 +419,16 @@ def on_signal(signum, frame):
 def run(argv):
     cmd = argv[1] if len(argv) > 1 else ""
     if cmd == "lock":
-        if len(argv) != 3 or not SECONDS_ARG.fullmatch(argv[2]):
-            raise UsageError("usage: keyboard-cleaner lock <15-600>")
+        no_stdin = argv[3:] == ["--no-stdin"]
+        if len(argv) not in (3, 4) or (len(argv) == 4 and not no_stdin) or not SECONDS_ARG.fullmatch(argv[2]):
+            raise UsageError("usage: keyboard-cleaner lock <15-600> [--no-stdin]")
         seconds = int(argv[2])
         if not SECONDS_RANGE[0] <= seconds <= SECONDS_RANGE[1]:
-            raise UsageError("usage: keyboard-cleaner lock <15-600>")
+            raise UsageError("usage: keyboard-cleaner lock <15-600> [--no-stdin]")
         safe.die_with_parent()
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             signal.signal(sig, on_signal)
-        return lock(seconds)
+        return lock(seconds, stdin_fd=None if no_stdin else 0)
     if cmd == "restore":
         if len(argv) != 2:
             raise UsageError("usage: keyboard-cleaner restore")

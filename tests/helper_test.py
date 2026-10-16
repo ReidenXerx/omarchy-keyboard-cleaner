@@ -432,5 +432,64 @@ class Static(unittest.TestCase):
             self.assertTrue((ROOT / entry).is_file(), entry)
 
 
+class FakeKWin:
+    """`busctl` over KWin's InputDevice objects: a keyboard, the power button, a keyboard that is also a pointer
+    (a mouse's keyboard interface) and a touchpad."""
+
+    DEVICES = {"event3": {"keyboard": True, "pointer": False}, "event4": {"keyboard": True, "pointer": False},
+               "event7": {"keyboard": True, "pointer": True}, "event9": {"keyboard": False, "pointer": True, "touchpad": True}}
+
+    def __init__(self):
+        self.enabled = {n: True for n in self.DEVICES}
+        self.calls = []
+
+    def run(self, argv, **kw):
+        self.calls.append(list(argv))
+        tail = argv[3:] if argv[:3] == ["busctl", "--user", "--json=short"] else None
+        if tail and tail[0] == "get-property" and tail[-1] == "devicesSysNames":
+            return result(json.dumps({"type": "as", "data": sorted(self.DEVICES) + ["../evil"]}).encode())
+        if tail and tail[0] == "call" and tail[-3:] == ["GetAll", "s", "org.kde.KWin.InputDevice"]:
+            name = tail[2].rsplit("/", 1)[1]
+            props = {k: {"type": "b", "data": v} for k, v in self.DEVICES[name].items()}
+            return result(json.dumps({"type": "a{sv}", "data": [props]}).encode())
+        if argv[:3] == ["busctl", "--user", "set-property"] and argv[-3:-1] == ["enabled", "b"]:
+            self.enabled[argv[4].rsplit("/", 1)[1]] = argv[-1] == "true"
+            return result(b"")
+        return result(returncode=1)
+
+
+class Plasma(Helper):
+    def setUp(self):
+        super().setUp()
+        self.kwin = FakeKWin()
+        for p in (mock.patch.object(self.m.safe, "run", self.kwin.run),
+                  mock.patch.object(self.m.safe, "has_tool", lambda name: name == "busctl"),
+                  mock.patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}),
+                  mock.patch.dict(os.environ, {}, clear=False)):
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+
+    def test_on_plasma_the_keyboards_are_kwins_and_pointers_stay_on(self):
+        self.assertTrue(self.m.kde_session())
+        self.assertEqual(self.m.keyboards(), ["event3", "event4"])
+        self.assertEqual(self.m.set_devices(["event3", "event4"], False), [])
+        self.assertEqual({n for n, on in self.kwin.enabled.items() if not on}, {"event3", "event4"})
+        self.assertEqual(self.m.set_devices(["../evil"], False), ["../evil"], "never a path out of the device tree")
+
+    def test_without_stdin_the_lock_ends_when_restore_takes_the_record(self):
+        box = {}
+        thread = threading.Thread(target=lambda: box.setdefault("code", self.m.lock(60, None, self.events.append)))
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.assertTrue(self.locked())
+        self.assertFalse(self.kwin.enabled["event3"])
+        self.assertEqual(self.m.restore(), 0)
+        thread.join(5)
+        self.assertEqual(box.get("code"), 0)
+        self.assertTrue(all(self.kwin.enabled.values()))
+        self.assertEqual([e["reason"] for e in self.events if e["event"] == "unlocked"], ["unlock"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
