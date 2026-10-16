@@ -442,18 +442,31 @@ class FakeKWin:
     def __init__(self):
         self.enabled = {n: True for n in self.DEVICES}
         self.calls = []
+        self.on_set = None
 
     def run(self, argv, **kw):
         self.calls.append(list(argv))
         tail = argv[3:] if argv[:3] == ["busctl", "--user", "--json=short"] else None
         if tail and tail[0] == "get-property" and tail[-1] == "devicesSysNames":
-            return result(json.dumps({"type": "as", "data": sorted(self.DEVICES) + ["../evil"]}).encode())
+            return result(json.dumps({"type": "as", "data": sorted(self.enabled) + ["../evil"]}).encode())
         if tail and tail[0] == "call" and tail[-3:] == ["GetAll", "s", "org.kde.KWin.InputDevice"]:
             name = tail[2].rsplit("/", 1)[1]
             props = {k: {"type": "b", "data": v} for k, v in self.DEVICES[name].items()}
+            props["enabled"] = {"type": "b", "data": self.enabled[name]}
             return result(json.dumps({"type": "a{sv}", "data": [props]}).encode())
+        if tail and tail[0] == "get-property" and tail[-1] == "enabled":
+            name = tail[2].rsplit("/", 1)[1]
+            if name not in self.enabled:
+                return result(returncode=1)
+            return result(json.dumps({"type": "b", "data": self.enabled[name]}).encode())
         if argv[:3] == ["busctl", "--user", "set-property"] and argv[-3:-1] == ["enabled", "b"]:
-            self.enabled[argv[4].rsplit("/", 1)[1]] = argv[-1] == "true"
+            name = argv[4].rsplit("/", 1)[1]
+            if name not in self.enabled:
+                return result(returncode=1)       # the device is gone
+            if self.on_set:
+                hook, self.on_set = self.on_set, None
+                hook(name, argv[-1] == "true")
+            self.enabled[name] = argv[-1] == "true"
             return result(b"")
         return result(returncode=1)
 
@@ -489,6 +502,38 @@ class Plasma(Helper):
         self.assertEqual(box.get("code"), 0)
         self.assertTrue(all(self.kwin.enabled.values()))
         self.assertEqual([e["reason"] for e in self.events if e["event"] == "unlocked"], ["unlock"])
+
+    def test_a_restore_landing_during_the_rescan_cannot_leave_the_keys_off(self):
+        box = {}
+        thread = threading.Thread(target=lambda: box.setdefault("code", self.m.lock(60, None, self.events.append)))
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.assertTrue(self.locked())
+        # The widget's restore runs exactly while the guard's next rescan is switching devices off.
+        self.kwin.on_set = lambda name, on: self.m.restore()
+        thread.join(5)
+        self.assertEqual(box.get("code"), 0)
+        self.assertTrue(all(self.kwin.enabled.values()), self.kwin.enabled)
+        self.assertFalse(self.state.exists())
+
+    def test_with_no_record_a_restore_switches_on_any_keyboard_left_off(self):
+        # A power cut mid-lock: KWin kept "enabled = false", the runtime directory lost the record.
+        self.kwin.enabled["event3"] = False
+        self.assertEqual(self.m.restore(), 0)
+        self.assertTrue(self.kwin.enabled["event3"])
+
+    def test_a_keyboard_unplugged_mid_lock_does_not_wedge_the_record(self):
+        box = {}
+        thread = threading.Thread(target=lambda: box.setdefault("code", self.m.lock(60, None, self.events.append)))
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.assertTrue(self.locked())
+        del self.kwin.enabled["event4"]
+        self.assertEqual(self.m.restore(), 0)
+        thread.join(5)
+        self.assertEqual(box.get("code"), 0)
+        self.assertTrue(all(self.kwin.enabled.values()))
+        self.assertFalse(self.state.exists(), "the record no longer blocks the next lock")
 
 
 if __name__ == "__main__":

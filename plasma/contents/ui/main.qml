@@ -16,10 +16,11 @@ import "../code/CleanerModel.js" as Model
 PlasmoidItem {
   id: root
 
-  readonly property string code: String(Qt.resolvedUrl("../code")).replace("file://", "")
+  readonly property string code: decodeURIComponent(String(Qt.resolvedUrl("../code")).replace("file://", ""))
   readonly property string envPrefix: "/usr/bin/env -i HOME=\"$HOME\" PATH=/usr/bin:/bin LANG=C.UTF-8"
     + " XDG_RUNTIME_DIR=\"$XDG_RUNTIME_DIR\" XDG_CURRENT_DESKTOP=\"$XDG_CURRENT_DESKTOP\""
-    + " DBUS_SESSION_BUS_ADDRESS=\"$DBUS_SESSION_BUS_ADDRESS\" "
+    // Only when set: an empty bus address makes busctl fail where leaving it out lets it find the bus.
+    + " ${DBUS_SESSION_BUS_ADDRESS:+DBUS_SESSION_BUS_ADDRESS=\"$DBUS_SESSION_BUS_ADDRESS\"} "
   readonly property string helper: root.envPrefix + "/usr/bin/python3 -I '" + root.code.replace(/'/g, "'\\''") + "/bin/keyboard-cleaner'"
   readonly property int seconds: Model.clampSeconds(Plasmoid.configuration.seconds, Model.DEFAULT_SECONDS)
 
@@ -67,9 +68,20 @@ PlasmoidItem {
         if (e && e.event === "error") error = e.message
       }
       var ok = Number(data["exit code"]) === 0
-      if (!ok || error) {
+      if (!ok && !error) {
+        // It locked, and then could not give everything back: try again, and say so plainly if that fails too.
+        root.run(root.helper + " restore", function (code) {
+          if (code === 0) { root.phase = "idle"; return }
+          root.phase = "failed"
+          root.message = "The keyboard may still be off. Use the mouse: right click the widget, or run its restore."
+          failedTimer.restart()
+          root.run("/usr/bin/notify-send --app-name='Keyboard cleaner' --icon=input-keyboard --urgency=critical -- "
+                   + "'The keyboard may still be off' "
+                   + root.quote("Run: /usr/bin/python3 " + root.code + "/bin/keyboard-cleaner restore"), null)
+        })
+      } else if (error) {
         root.phase = "failed"
-        root.message = error || "The keyboard could not be switched off."
+        root.message = error
         failedTimer.restart()
       } else {
         root.phase = "idle"
@@ -96,8 +108,17 @@ PlasmoidItem {
   function unlock() {
     if (root.phase !== "locked") return
     root.phase = "unlocking"
-    root.run(root.helper + " restore", null)
+    root.message = ""
+    root.run(root.helper + " restore", function (code) {
+      // Not given back yet (KWin did not answer, say): back to the ring, so the hold can be tried again.
+      if (code !== 0 && root.phase === "unlocking") {
+        root.phase = "locked"
+        root.message = "The keyboard could not be given back yet. Hold the ring again."
+      }
+    })
   }
+
+  function quote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
   // Past the deadline and its grace the guard should long be gone; ask it to stop.
   Timer {

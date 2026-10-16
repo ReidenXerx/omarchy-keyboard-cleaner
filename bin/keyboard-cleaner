@@ -148,6 +148,22 @@ def kwin_keyboards():
     return out
 
 
+def kwin_present():
+    """Every input device KWin has now, by sys name, or None if it could not be asked."""
+    names = busctl_json(["get-property", KWIN[0], KWIN[1], "org.kde.KWin.InputDeviceManager", "devicesSysNames"])
+    return [n for n in names if isinstance(n, str)] if isinstance(names, list) else None
+
+
+def kwin_disabled_keyboards():
+    """KWin keyboards that are switched off, whoever did it -- for the sweep a restore with no record makes."""
+    out = []
+    for name in kwin_keyboards() or []:
+        props = busctl_json(["get-property", KWIN[0], f"{KWIN[1]}/{name}", KWIN[2], "enabled"])
+        if props is False:
+            out.append(name)
+    return out
+
+
 def kwin_set(names, enabled):
     failed = []
     for name in names:
@@ -247,6 +263,11 @@ def restore(expected_id=None):
     leaves a newer lock alone."""
     state, trouble = read_lock()
     if state is None and not trouble:
+        if expected_id is None and kde_session():
+            # KWin keeps a device's "enabled" across sessions, while the record lives in the runtime directory, which
+            # a power cut or a reboot empties. With no lock running, a switched-off keyboard is one to switch on:
+            # turning a keyboard on is never the dangerous direction. This runs whenever the widget loads.
+            set_devices(kwin_disabled_keyboards(), True)
         return 0
     if expected_id is not None and state is not None and state["id"] != expected_id:
         return 0
@@ -259,6 +280,12 @@ def restore(expected_id=None):
     failed = names
     for attempt in range(RESTORE_ATTEMPTS):
         failed = set_devices(failed, True)
+        if failed:
+            # A device that is gone (unplugged, asleep, or one a different compositor named) has nothing left to
+            # switch on; only the ones still present can keep a record alive.
+            present = kwin_present() if kde_session() else keyboards()
+            if present is not None:
+                failed = [n for n in failed if n in present]
         if not failed:
             break
         time.sleep(0.25 * (attempt + 1))
@@ -320,16 +347,30 @@ def stop_process(proc):
             time.sleep(0.05)
 
 
+def still_ours(state):
+    current, _ = read_lock()
+    return current is not None and current["id"] == state["id"]
+
+
 def keep_locked(state):
+    """Re-assert the lock; False when it was given back meanwhile. A `restore` from elsewhere (the Plasma widget's
+    unlock) can land in the middle of this, so the record is checked before anything is written or switched off,
+    and again after: if it went while the devices were being switched off, they are switched straight back on."""
+    if not still_ours(state):
+        return False
     current = keyboards()
     if current is not None:
         new = [n for n in current if n not in state["devices"]]
         new = new[:max(0, DEVICES_MAX - len(state["devices"]))]
-        if new:
+        if new and still_ours(state):
             # Recorded before they go off, like the first batch.
             state["devices"] = state["devices"] + new
             save_state(state)
     set_devices(state["devices"], False)
+    if not still_ours(state):
+        set_devices(state["devices"], True)
+        return False
+    return True
 
 
 def wait_for_unlock(state, stdin_fd):
@@ -350,7 +391,8 @@ def wait_for_unlock(state, stdin_fd):
                 return "unlock"
             if time.monotonic() >= next_scan:
                 next_scan = time.monotonic() + RESCAN_EVERY
-                keep_locked(state)
+                if not keep_locked(state):
+                    return "unlock"
             continue
         try:
             ready, _, _ = select.select([stdin_fd], [], [], min(POLL, remaining))
@@ -368,7 +410,8 @@ def wait_for_unlock(state, stdin_fd):
                 return "unlock"
         if time.monotonic() >= next_scan:
             next_scan = time.monotonic() + RESCAN_EVERY
-            keep_locked(state)
+            if not keep_locked(state):
+                return "unlock"
 
 
 def lock(seconds, stdin_fd=0, emit=emit_json):
@@ -404,6 +447,9 @@ def lock(seconds, stdin_fd=0, emit=emit_json):
               "deadline": round(state["deadline"], 3), "seconds": seconds})
         reason = wait_for_unlock(state, stdin_fd)
     finally:
+        # From this guard's own list first, whatever the record says: a record taken away by another restore while
+        # the devices were going off must not leave them off.
+        set_devices(state["devices"], True)
         code = restore(expected_id=lock_id)
         stop_process(inhibitor)
         emit({"event": "unlocked", "reason": reason, "ok": code == 0})

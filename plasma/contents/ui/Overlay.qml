@@ -132,6 +132,13 @@ Item {
           color: Qt.rgba(1, 1, 1, 0.6)
           text: Model.hint(overlay.cleaner.phase, overlay.holdProgress)
         }
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          visible: overlay.cleaner.phase === "locked" && overlay.cleaner.message !== ""
+          textFormat: Text.PlainText
+          color: "#FFB4AB"
+          text: overlay.cleaner.message
+        }
       }
     }
   }
